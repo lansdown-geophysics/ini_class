@@ -8,10 +8,12 @@ import matplotlib.image
 from matplotlib.colors import LightSource
 import os
 import colorcet as cc
-
+import cc_colours
+import timeit
 # from PIL import Image
 from rasterio.plot import show
 import rasterio as raz
+from fiona.crs import CRS
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -104,27 +106,33 @@ class Ini_dict:
 class GIS_images:
     PINK = 213
 
-    def __init__(self, array=None, extent=None, profile=None, norm_type=None, cmap=None,
-                 vmin=None, vmax=None, bounds=None, norm_labels=None, do_plot=True,
-                 do_shade=False, azdeg=315, altdeg=45 ):
+    def __init__(self, array=None, extent=None, profile=None, norm_type=None, cmap=None, vcenter=None,
+                 vmin=None, vmax=None, bounds=None, norm_labels=None, min_max_neither='neither',  do_plot=True,
+                 do_shade=False, azdeg=315, altdeg=45, gamma=1.0, plot_name=None, cbar_title=None, do_write_im=False,
+                 im_name='', epsg=None):
         self.array = array
         self.extent = extent
         self.profile = profile
         self.cmap = cmap
         self.norm_type = norm_type
-        self.norm = None
+        self.vcenter = vcenter
         self.vmin = vmin
         self.vmax = vmax
+        self.min_max_neither = min_max_neither
         self.bounds = bounds
         self.norm_labels = norm_labels
         self.do_plot = do_plot
         self.do_shade = do_shade
+        self.do_write_im = do_write_im
         self.im_array = np.ndarray
-        self.im_name = ''
-        self.cbar_title = None
+        self.im_name = im_name
+        self.epsg = epsg
         self.num = ''
         self.azdeg = azdeg
         self.altdeg = altdeg
+        self.gamma = gamma
+        self.plot_name = plot_name
+        self.cbar_title = cbar_title
         self.plot()
 
     def __write_world_file(self):
@@ -132,7 +140,7 @@ class GIS_images:
         see: https://en.wikipedia.org/wiki/World_file
 
         """
-        world_name = os.path.splitext(self.im_name)[0] + '.wld'
+        world_name = os.path.splitext(self.im_name)[0] + '.pgw'
         affine = self.profile.get('transform')
         with open(world_name, 'w') as a_world_file:
             a_world_file.write('{0:.10f}'.format(affine.a) + '\n')
@@ -150,6 +158,17 @@ class GIS_images:
         print('\t{0:.10f}'.format(affine.c))
         print('\t{0:.10f}'.format(affine.f) + rs.fg)
 
+    def __write_prj_file(self):
+        if epsg is not None:
+            crs = CRS.from_epsg(self.epsg)
+            proj = crs.wkt
+            prj_name = os.path.splitext(self.im_name)[0] + '.prj'
+            with open(prj_name, 'w') as a_prj_file:
+                a_prj_file.write(proj)
+            print(fg.cyan + 'prj file parameters: \n' + proj.replace(']],', ']\n') + fg.rs)
+        else:
+            pass
+
     def __write_colour_bar(self):
         c_bar_f_name = os.path.splitext(self.im_name)[0]+'_cbar_' + os.path.splitext(self.im_name)[1]
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -157,18 +176,14 @@ class GIS_images:
 
         ax.tick_params(labelsize=15)
 
-        cb = plt.colorbar(mpl.cm.ScalarMappable(norm=self.norm, cmap=self.cmap),
-                          cax=ax,
-                          # extend='max',
-                          ticks=bounds,
-                          spacing='proportional',
-                          orientation='vertical', )
+        cb = self.__make_colour_bar(ax)
         if self.norm_labels is not None:
             cb.ax.set_yticks(self.norm_labels)
-            cb.ax.set_yticklabels(self.norm_labels, fontsize=6)
+            cb.ax.set_yticklabels(self.norm_labels)
         cb.set_label(label=self.cbar_title, size=10, )
+        cb.ax.tick_params(labelsize=10)
         # cb.set_label(label='Slope (\N{degree sign})', size=25, )
-        plt.savefig(c_bar_f_name, dpi=300, bbox_inches='tight', transparent=True)
+        plt.savefig(c_bar_f_name, dpi=150, bbox_inches='tight', transparent=True)
         print(fg.yellow + ef.i + 'colour bar saved: ' + c_bar_f_name + rs.ef)
 
     def __make_norm(self):
@@ -182,47 +197,46 @@ class GIS_images:
         if self.norm_type == 'powernorm':
             self.norm = mpl.colors.PowerNorm(3.0, vmin=self.vmin, vmax=self.vmax, )
         if self.norm_type == 'twoslope':
-            self.norm = mpl.colors.TwoSlopeNorm(-25, vmin=self.vmin, vmax=self.vmax, )
+            self.norm = mpl.colors.TwoSlopeNorm(vcenter=self.vcenter, vmin=self.vmin, vmax=self.vmax, )
 
     def __make_shade(self, shade_array):
         if self.do_shade:
             ls = LightSource(azdeg=self.azdeg, altdeg=self.altdeg)
-            return ls.shade(shade_array, self.cmap, norm=self.norm)
-        else:
-            self.im_array = self.cmap(self.norm(self.im_array))
-            self.azdeg = None
-            self.altdeg = None
-            return shade_array
+            shaded = ls.shade(shade_array, self.cmap, norm=self.norm, blend_mode='overlay')
+            # shaded = shaded.reshape(shaded.shape[0], shaded.shape[1])
+            return shaded
+        if not self.do_shade:
+            shaded = self.cmap(self.norm(shade_array))
+            return shaded
 
-    def write_image(self, im_name, cbar_label=None):
+    def __write_image(self):
         """
         writes image , colour bar, and world file(.wld)
         :param cbar_label: text for cbar
         :param im_name: image name with extension
         """
-        self.im_name = im_name
-        self.cbar_title = cbar_label
-        self.im_array = self.__make_shade(self.im_array)
-
-        matplotlib.image.imsave(self.im_name, self.im_array, cmap=self.cmap, metadata={'Comment': self.num})
+        self.cbar_title = cbar_title
+        # self.im_array = self.__make_shade(self.im_array)
+        #
+        matplotlib.image.imsave(self.im_name, self.array, cmap=self.cmap, metadata={'Comment': self.num})
         print(fg.yellow + ef.i + 'image file saved : ' + self.im_name + rs.ef)
         self.__write_colour_bar()
         self.__write_world_file()
+        self.__write_prj_file()
 
     def plot(self):
         self.__make_norm()
         self.array = self.array.reshape(self.array.shape[0], self.array.shape[1])
-        self.im_array = self.array.copy()
-        self.array = self.__make_shade(self.array)
+        # self.im_array = self.array.copy()
 
-        self.num = ('norm: ' + self.norm_type + ' | pal: ' + self.cmap.name
-                    + ' | N: ' + str(self.cmap.N) + ' vmin: ' + str(self.vmin) + ' vmax: ' + str(self.vmax)
-                    + ' | shade: ' + str(self.do_shade)
-                    + ' az: ' + str(self.azdeg) + ' alt: ' + str(self.altdeg)
-                    + ' | angus@lansdown-geophysics.co.uk')
+        self.array = self.__make_shade(self.array)
+        print(fg(self.PINK) + 'after shade array shape: ' + str(self.array.shape) + fg.rs)
+
+        self._image_metadata()
         print(fg(self.PINK) + self.num + fg.rs)
         ax_list = []
         fig = plt.figure(figsize=(8, 8), num=self.num)
+        fig.suptitle(self.plot_name)
         axd = fig.subplot_mosaic([['ax01']], sharex=False, )
         for k in axd:
             ax_list.append(axd[k])
@@ -231,8 +245,9 @@ class GIS_images:
             ax.set_box_aspect(1)
         if 'ax01' in axd:
 
-            # axd['ax01'].imshow(self.array, cmap=self.cmap, extent=self.extent, norm=self.norm,)
-            axd['ax01'].imshow(self.array, cmap=self.cmap, extent=self.extent, norm=self.norm)
+            axd['ax01'].imshow(self.array, cmap=self.cmap, extent=self.extent, norm=self.norm,)
+            # matplotlib.image.imsave(self.im_name, self.array, cmap=self.cmap, metadata={'Comment': self.num})
+            # axd['ax01'].imshow(self.array, cmap=self.cmap, extent=self.extent, norm=self.norm)
             print(fg(self.PINK) + 'array shape: ' + str(self.array.shape) + fg.rs)
             # self.im_array = self.cmap(self.norm(self.array))
             # self.im_array = self.im_array.reshape(self.im_array.shape[0], self.im_array.shape[1], self.im_array.shape[3])
@@ -240,19 +255,38 @@ class GIS_images:
             axd['ax01'].grid()
             divider = make_axes_locatable(axd['ax01'])
             cax = divider.append_axes('right', size='5%', pad=0.05)
-            clb = plt.colorbar(mpl.cm.ScalarMappable(norm=self.norm, cmap=self.cmap),
-                               cax=cax,
-                               ticks=self.bounds,
-                               spacing='proportional',
-                               orientation='vertical', )
-            clb.ax.tick_params(labelsize=8, direction='in')
+            cb = self.__make_colour_bar(cax)
+            cb.ax.tick_params(labelsize=8, direction='in')
+            cb.set_label(label=self.cbar_title, size=10, )
 
             if self.norm_labels is not None:
-                clb.ax.set_yticks(self.norm_labels)
-                clb.ax.set_yticklabels(self.norm_labels)
-            if self.do_plot:
-                plt.show()
+                cb.ax.set_yticks(self.norm_labels)
+                cb.ax.set_yticklabels(self.norm_labels)
+        if self.do_write_im:
+            self.__write_image()
+        if self.do_plot:
+            plt.show()
             # return im_array, norm
+
+    def _image_metadata(self):
+        self.num = ('norm: ' + self.norm_type + ' | pal: ' + self.cmap.name
+                    + ' | gamma: ' + str(self.gamma) + ' | epsg: ' + str(self.epsg)
+                    + ' | N: ' + str(self.cmap.N) + ' vmin: ' + str(self.vmin) + ' vmax: ' + str(self.vmax)
+                    + ' | vcenter: ' + str(self.vcenter)
+                    + ' | bounds: ' + str(self.bounds) + ' | norm_labels: ' + str(self.norm_labels)
+                    + ' | extend: ' + str(self.min_max_neither)
+                    + ' | shade: ' + str(self.do_shade)
+                    + ' az: ' + str(self.azdeg) + ' alt: ' + str(self.altdeg)
+                    + ' | angus')
+
+    def __make_colour_bar(self, cax):
+        clb = plt.colorbar(mpl.cm.ScalarMappable(norm=self.norm, cmap=self.cmap),
+                           cax=cax,
+                           ticks=self.bounds,
+                           extend=self.min_max_neither,
+                           spacing='proportional',
+                           orientation='vertical', )
+        return clb
 
 
 def f_stem(full_file_name):
@@ -266,8 +300,8 @@ def read_grid(grid_name):
         grid = a_raster.read(masked=True)
         a_profile = a_raster.profile
     grid_array = raz.plot.reshape_as_image(grid)
-    # print(type(grid_array))
     grid_extent = raz.plot.plotting_extent(a_raster)
+    print(fg.cyan + 'grid_array min: {0:.2f} grid_array max: {1:.2f}'.format(grid.min(), grid.max()) + fg.rs)
     return grid_array, grid_extent, a_profile
 
 
@@ -344,31 +378,55 @@ if __name__ == '__main__':
 
         saga_palette = ini.single_file_1
         gamma_func = float(ini.gamma)
+        center_val = float(ini.center_val)
+        if ini.center_val.lower() == 'none':
+            center_val = None
+
         min_val = float(ini.a_vmin)
         max_val = float(ini.a_vmax)
         if min_val == max_val:
             min_val = None
             max_val = None
         n_colours = int(ini.n_colours)
-        norm_labels = ini.norm_labels.split(',')
-        norm_labels = [float(x) for x in norm_labels]
-        norm_labels = None
+        if ini.norm_labels.lower() == 'none':
+            norm_labels = None
+        else:
+            norm_labels = ini.norm_labels.split(',')
+            norm_labels = [float(x) for x in norm_labels]
+        min_max_neither = ini.min_max_neither
         normalisation_type = ini.norm_type
         screen_plot = string_to_bool(ini.do_plot)
         shade_image = string_to_bool(ini.do_shade)
-        use_inbuilt_palette = string_to_bool(ini.do_use_inbuilt_palette)
+        use_inbuilt_palette = string_to_bool(ini.do_inbuilt_pal)
+        write_images = string_to_bool(ini.do_write_im)
+        if ini.epsg.split(' ', maxsplit=1)[0].lower() == 'none':
+            epsg = None
+        else:
+            epsg = int(ini.epsg.split(' ', maxsplit=1)[0])
         sun_az = int(ini.sun_az)
         sun_alt = int(ini.sun_alt)
-        print(shade_image)
+        cbar_title = ini.cbar_title
+        cmaps = ini.cmaps
+        pal_name = ini.pal_name
+
     except AttributeError as e:
         print(fg(196) + ef.i + ' missing parameter in the ini file: ' + str(e).strip() + rs.all)
-        exit()
+
+    start_time = timeit.default_timer()
+
     if use_inbuilt_palette:
         # Note: https://cmasher.readthedocs.io/user/cmap_overviews/cmr_cmaps.html
-        palette_list = cmr.neon_r.colors
-        palette_name = cmr.neon_r.name
-        # palette_list = cc.linear_gow_60_85_c27
-        # palette_name = 'linear_gow_60_85_c27'
+        # Note: https://colorcet.holoviz.org/user_guide/index.html
+        # Note: https://matplotlib.org/stable/tutorials/colors/colormaps.html
+        if cmaps == 'mpl':
+            palette_list = mpl.colormaps.get_cmap(pal_name).colors
+            palette_name = pal_name
+        if cmaps == 'cmasher':
+            palette_list = cmr.take_cmap_colors(pal_name, n_colours)
+            palette_name = pal_name
+        if cmaps == 'cc':
+            palette_list = cc_colours.cc_dict[pal_name]
+            palette_name = pal_name
     else:
         palette_list = read_saga_palette(ini.single_file_1)
         palette_name = f_stem(ini.single_file_1)
@@ -378,7 +436,7 @@ if __name__ == '__main__':
     if normalisation_type == 'boundary':
         bounds = ini.bounds.split(',')
         bounds = [float(x) for x in bounds]
-        n_colours = len(bounds) + 1
+        n_colours = len(bounds)
     else:
         bounds = None
     cmap = resample_colour_map(colour_map, n_colours)
@@ -391,8 +449,11 @@ if __name__ == '__main__':
 
         image_file = ini.dir_path + os.sep + f_stem(a_grid_file) + image_ext
         gis = GIS_images(array=array, extent=extent, profile=profile, norm_type=normalisation_type,
-                         cmap=cmap, vmin=min_val, vmax=max_val, bounds=bounds, norm_labels=norm_labels,
-                         do_plot=screen_plot, do_shade=shade_image, azdeg=sun_az, altdeg=sun_alt)
-        gis.write_image(image_file, 'Depth (m)')
-
-    input('press return to close...')
+                         cmap=cmap, vcenter=center_val, vmin=min_val, vmax=max_val, bounds=bounds,
+                         norm_labels=norm_labels, min_max_neither=min_max_neither,
+                         do_plot=screen_plot, do_shade=shade_image, azdeg=sun_az, altdeg=sun_alt,
+                         gamma=gamma_func, plot_name=f_stem(a_grid_file), cbar_title=cbar_title,
+                         do_write_im=write_images, im_name=image_file, epsg=epsg)
+    print(timeit.default_timer() - start_time)
+    print('\U0001f60e done!')
+    input('press return to close...\U0001F590')
